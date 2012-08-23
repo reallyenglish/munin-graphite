@@ -23,35 +23,14 @@
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 # 
 
-require 'socket'
+# TODO
+# - use daemons
+# - create generic log interface
 
-class Munin
-  def initialize(host='localhost', port=4949)
-    @munin = TCPSocket.new(host, port)
-    @munin.gets
-  end
-  
-  def get_response(cmd)
-    @munin.puts(cmd)
-    stop = false 
-    response = Array.new
-    while stop == false
-      line = @munin.gets
-      line.chomp!
-      if line == '.'
-        stop = true
-      else
-        response << line 
-        stop = true if cmd == "list"
-      end
-    end
-    response
-  end
-  
-  def close
-    @munin.close
-  end
-end
+require 'rubygems'
+require 'munin-ruby'
+require 'optparse'
+require 'syslog'
 
 class Carbon
   def initialize(host='localhost', port=2003)
@@ -67,43 +46,82 @@ class Carbon
   end
 end
 
-while true
-  metric_base = "servers."
-  all_metrics = Array.new
+option_of = {
+  :carbon_host  => "localhost",
+  :carbon_port  => 2003,
+  :munin_host  => "localhost",
+  :munin_port  => 4949,
+  :interval     => 60,
+  :metric_base  => "servers"
+}
+OptionParser.new do |opts|
+  opts.banner = "Usage: example.rb [options]"
+  opts.on( '-h', '--help', 'Display this screen' ) do
+  end
+  opts.on( '--munin-host VALUE' ) do |munin_host|
+    option_of[:munin_host] = munin_host
+  end
+  opts.on( '--munin-port VALUE' ) do |munin_port|
+    option_of[:munin_port] = munin_port.to_i
+  end
+  opts.on( '--carbon-host VALUE' ) do |carbon_host|
+    option_of[:carbon_host] = carbon_host
+  end
+  opts.on( '--carbon-port VALUE' ) do |carbon_port|
+    option_of[:carbon_port] = carbon_port.to_i
+  end
+  opts.on( '--interval VALUE' ) do |interval|
+    option_of[:interval] = interval.to_i
+  end
+  opts.on( '--metric-base VALUE' ) do |metric_base|
+    option_of[:metric_base] = metric_base
+  end
+  opts.on( '--debug' ) do |debug|
+    option_of[:debug] = debug
+  end
+end.parse!
 
-  munin = Munin.new(ARGV[0])
-  munin.get_response("nodes").each do |node|
-    metric_base << node.split(".").reverse.join(".")
-    puts "Doing #{metric_base}"
-    munin.get_response("list")[0].split(" ").each do |metric|
-      puts "Grabbing #{metric}"
-      mname = "#{metric_base}"
-      has_category = false
-      base = false
-      munin.get_response("config #{metric}").each do |configline|
-        if configline =~ /graph_category (.+)/
-          mname << ".#{$1}"
-          has_category = true
-        end
-        if configline =~ /graph_args.+--base (\d+)/
-          base = $1
-        end
-      end
-      mname << ".other" unless has_category
-      munin.get_response("fetch #{metric}").each do |line|
-        line =~ /^(.+)\.value\s+(.+)$/
-        field = $1
-        value = $2
-        all_metrics << "#{mname}.#{metric}.#{field} #{value} #{Time.now.to_i}"
+myname = "munin-graphite"
+syslog_option = option_of[:debug] ? Syslog::LOG_PERROR : Syslog::LOG_PID
+syslog_facility = Syslog::LOG_USER
+Syslog.open(myname, syslog_option, syslog_facility)
+
+node = nil
+while true
+  all_metrics = []
+
+  begin
+    node = Munin::Node.new(option_of[:munin_host], option_of[:munin_port])
+    fqdn = node.nodes.first
+    node.list.sort.each do |service|
+      config = node.config("#{service}")
+      metric_of = node.fetch("#{service}")["#{service}"]
+      metric_of.keys.sort.each do |field|
+        metric = [ option_of[:metric_base], fqdn.split(".").reverse, service, field ].join(".")
+        value = metric_of["#{field}"]
+        now = Time.now.to_i
+        all_metrics << "#{metric} #{value} #{now}"
       end
     end
+  rescue Munin::ConnectionError => ex
+    Syslog.err("%s" % ex.message)
+    Syslog.err("%s" % ex.backtrace.inspect)
+    Syslog.err("retrying in %d sec" % option_of[:interval])
+    sleep option_of[:interval]
+    retry
+  rescue Exception => ex
+    Syslog.err("%s" % ex.message)
+    Syslog.err("%s" % ex.backtrace.inspect)
+    raise
   end
 
-  carbon = Carbon.new(ARGV[1])
+  carbon = Carbon.new(option_of[:carbon_host], option_of[:carbon_port])
   all_metrics.each do |m|
-    puts "Sending #{m}"
+    Syslog.info "Sending #{m}" if option_of[:debug]
+    # XXX rescue me
     carbon.send(m)
   end
-  sleep 60
+
+  sleep option_of[:interval]
 end
 
