@@ -1,0 +1,34 @@
+#!/bin/sh
+#
+# PROVIDE: munin-graphite
+# KEYWORD: shutdown
+
+# munin_graphite_enable (bool): Set to NO by default.
+
+. /etc/rc.subr
+
+name="munin_graphite"
+rcvar=${name}_enable
+
+load_rc_config ${name}
+: ${munin_graphite_enable:="NO"}
+: ${munin_graphite_runas:="munin"}
+: ${munin_graphite_piddir:="/var/run/munin-graphite"}
+
+munin_graphite_pidfile="${munin_graphite_piddir}/munin-graphite.pid"
+
+command_interpreter="/usr/local/bin/ruby"
+command="/usr/local/bin/munin-graphite"
+command_args="--user ${munin_graphite_runas} --piddir ${munin_graphite_piddir}"
+
+status_cmd="munin_graphite_status"
+
+munin_graphite_status() {
+    # daemons gem changes the name of application, like "ruby:
+    # munin-graphite (ruby)". rc.subr(8) tries to open munin-graphite without
+    # path and fails. surpress the warning below.
+    #
+    # "munin-graphite: WARNING: $command_interpreter ruby: != /usr/local/bin/ruby"
+    check_pidfile ${munin_graphite_pidfile} munin-graphite ruby: 2>/dev/null
+}
+run_rc_command "$1"
